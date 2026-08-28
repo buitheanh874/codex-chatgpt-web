@@ -1160,8 +1160,52 @@ export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array
 
 export function chatGptPromptFilePayloads(
   prompt: CompiledChatGptWebPrompt,
+  overflowBuffer?: Buffer,
 ): Array<{ name: string; mimeType: string; buffer: Buffer }> {
-  return chatGptImageFilePayloads(prompt.images);
+  const files = chatGptImageFilePayloads(prompt.images);
+  if (overflowBuffer && overflowBuffer.length > 0) {
+    files.push({
+      name: "context_overflow.md",
+      mimeType: "text/markdown",
+      buffer: overflowBuffer,
+    });
+  }
+  return files;
+}
+
+const HYBRID_CONTEXT_THRESHOLD = 15_000;
+
+export function splitLargePrompt(prompt: string): {
+  inlineText: string;
+  overflowBuffer: Buffer | undefined;
+} {
+  if (prompt.length <= HYBRID_CONTEXT_THRESHOLD) {
+    return { inlineText: prompt, overflowBuffer: undefined };
+  }
+
+  let splitIndex = prompt.lastIndexOf("\n\n", HYBRID_CONTEXT_THRESHOLD);
+  if (splitIndex < HYBRID_CONTEXT_THRESHOLD * 0.5) {
+    splitIndex = prompt.lastIndexOf("\n", HYBRID_CONTEXT_THRESHOLD);
+  }
+  if (splitIndex < HYBRID_CONTEXT_THRESHOLD * 0.5) {
+    splitIndex = HYBRID_CONTEXT_THRESHOLD;
+    const prevCharCode = prompt.charCodeAt(splitIndex - 1);
+    if (prevCharCode >= 0xD800 && prevCharCode <= 0xDBFF) {
+      splitIndex -= 1;
+    }
+  }
+
+  const inlinePortion = prompt.slice(0, splitIndex);
+  const overflowPortion = prompt.slice(splitIndex);
+
+  const inlineText = inlinePortion
+    + "\n\n[IMPORTANT: The rest of this context is attached as the file \`context_overflow.md\`. "
+    + "You MUST read the attached file carefully and treat its content as part of this prompt. "
+    + "Do NOT ignore it.]";
+
+  const overflowBuffer = Buffer.from(overflowPortion, "utf-8");
+
+  return { inlineText, overflowBuffer };
 }
 
 export class ChatGptBrowserWorker {
@@ -2397,12 +2441,20 @@ export class ChatGptBrowserWorker {
     return { effort: mode.displayLabel, response: CHATGPT_SMOKE_EXPECTED };
   }
 
-  private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {
-    const files = chatGptPromptFilePayloads(prompt);
+  private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt, overflowBuffer?: Buffer): Promise<void> {
+    const files = chatGptPromptFilePayloads(prompt, overflowBuffer);
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const input = page.locator('input[data-testid="upload-photos-input"]');
+    const hasNonImage = files.some(f => f.mimeType === "text/markdown" || !f.mimeType.startsWith("image/"));
+    let input = page.locator('input[type="file"]').first();
+    if (!hasNonImage) {
+      input = page.locator('input[data-testid="upload-photos-input"]');
+      const hasPhotoInput = await input.count().catch(() => 0);
+      if (hasPhotoInput === 0) {
+        input = page.locator('input[type="file"]').first();
+      }
+    }
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
@@ -3021,7 +3073,8 @@ export class ChatGptBrowserWorker {
       }
       await diagnostics.capture(page, "effort-selection-complete");
 
-      let finalPrompt = prepared.text;
+      const { inlineText: _hybridInline, overflowBuffer: _hybridOverflow } = splitLargePrompt(prepared.text);
+      let finalPrompt = _hybridInline;
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
@@ -3139,7 +3192,7 @@ export class ChatGptBrowserWorker {
       }
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
-        this.attachFiles(page, prepared)
+        this.attachFiles(page, prepared, _hybridOverflow)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
       const finalSubmissionEvidence = await this.runStage(

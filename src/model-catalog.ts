@@ -110,7 +110,7 @@ export function buildChatGptWebModel(
   const model: JsonObject = {
     ...structuredClone(template),
     slug: route.slug,
-    display_name: route.displayName,
+    display_name: route.displayName + " (Web)",
     description: route.description,
     input_modalities: ["text", "image"],
     visibility: "list",
@@ -132,7 +132,7 @@ export function buildChatGptWebModel(
     tool_mode: null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName + " (Web)")],
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,
