@@ -800,6 +800,11 @@ export async function callTurnBroker<T>(
         return;
       }
       response = parsed;
+      // A complete framed response means the client will not write anything else on this
+      // connection. Explicitly half-close the client side so Bun/Windows named pipes can finish
+      // the shutdown handshake. The promise still settles only from `close`, preserving the
+      // transport-before-retirement invariant above.
+      socket.end();
     });
   });
 }

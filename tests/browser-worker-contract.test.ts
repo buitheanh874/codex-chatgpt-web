@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, splitLargePrompt, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -47,6 +47,9 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(runBrowserTurn).toContain("waitForMultipartAcknowledgement(");
   expect(runBrowserTurn).toContain("formatChatGptWebMultipartCommit(");
   expect(runBrowserTurn).toContain("resolveChatGptWebMultipartStagingMode(");
+  expect(runBrowserTurn).toContain("const hybridPrompt = prepared.multipart");
+  expect(runBrowserTurn).toContain("? { inlineText: prepared.text, overflowBuffer: undefined }");
+  expect(runBrowserTurn).toContain("this.attachFiles(page, prepared, hybridPrompt.overflowBuffer)");
   expect(runBrowserTurn).toContain('"final_part_effort_selection"');
   const promptAttached = runBrowserTurn.indexOf('await diagnostics.capture(page, "prompt-attachment-complete")');
   const finalEffortSelected = runBrowserTurn.indexOf('"final_part_effort_selection"');
@@ -60,6 +63,39 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   );
   expect(runBrowserTurn).not.toContain("userTurns.nth(initialUserTurnCount).waitFor");
   expect(workerSource).not.toMatch(/\bclipboard\b|pbcopy|pbpaste/i);
+});
+
+test("Hybrid Split keeps the complete Lexical payload within 15k and preserves overflow exactly", () => {
+  for (const length of [14_999, 15_000]) {
+    const prompt = "a".repeat(length);
+    const result = splitLargePrompt(prompt);
+    expect(result.inlineText).toBe(prompt);
+    expect(result.overflowBuffer).toBeUndefined();
+  }
+
+  const prompt = "a".repeat(15_001);
+  const result = splitLargePrompt(prompt);
+  expect(result.inlineText.length).toBeLessThanOrEqual(15_000);
+  expect(result.overflowBuffer).toBeDefined();
+  const markerIndex = result.inlineText.indexOf("\n\n[IMPORTANT:");
+  expect(markerIndex).toBeGreaterThan(0);
+  const reconstructed = result.inlineText.slice(0, markerIndex)
+    + result.overflowBuffer!.toString("utf8");
+  expect(reconstructed).toBe(prompt);
+});
+
+test("Hybrid Split never slices a Unicode surrogate pair at its hard boundary", () => {
+  const baseline = splitLargePrompt("a".repeat(20_000));
+  const splitBudget = baseline.inlineText.indexOf("\n\n[IMPORTANT:");
+  expect(splitBudget).toBeGreaterThan(0);
+
+  const prompt = "a".repeat(splitBudget - 1) + "😀" + "z".repeat(10_000);
+  const result = splitLargePrompt(prompt);
+  const markerIndex = result.inlineText.indexOf("\n\n[IMPORTANT:");
+  expect(markerIndex).toBe(splitBudget - 1);
+  expect(result.inlineText.length).toBeLessThanOrEqual(15_000);
+  expect(result.overflowBuffer!.toString("utf8").startsWith("😀")).toBeTrue();
+  expect(result.inlineText.slice(0, markerIndex) + result.overflowBuffer!.toString("utf8")).toBe(prompt);
 });
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {
@@ -964,6 +1000,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
   };
   const input = {
+    count: async () => 1,
     waitFor: async (state: { state: string; timeout: number }) => {
       expect(state).toEqual({ state: "attached", timeout: 20_000 });
       calls.push(["inputReady"]);
@@ -995,6 +1032,63 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     ["fileTile", "codex-input-image-1.png"],
     ["sendEnabled"],
   ]);
+});
+
+test("markdown overflow always uses a non-photo file input, including mixed image payloads", async () => {
+  const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const calls: string[] = [];
+  const composerForm = {
+    getByRole: (_role: string, options: { name: string; exact: boolean }) => ({
+      waitFor: async () => {
+        calls.push(`tile:${options.name}`);
+      },
+    }),
+    getByTestId: () => ({
+      isEnabled: async () => true,
+    }),
+  };
+  const composer = {
+    locator: () => composerForm,
+  };
+  const genericInput = {
+    waitFor: async () => {
+      calls.push("generic-ready");
+    },
+    setInputFiles: async (files: Array<{ name: string }>) => {
+      calls.push(`generic:${files.map(file => file.name).join(",")}`);
+    },
+  };
+  const photoInput = {
+    count: async () => 1,
+    waitFor: async () => {
+      calls.push("photo-ready");
+    },
+    setInputFiles: async () => {
+      calls.push("photo:set-files");
+    },
+  };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === 'input[type="file"]:not([data-testid="upload-photos-input"])') {
+        return { first: () => genericInput };
+      }
+      if (selector === 'input[data-testid="upload-photos-input"]') return photoInput;
+      if (selector === '[role="alert"]') return { allInnerTexts: async () => [] };
+      throw new Error(`Unexpected selector: ${selector}`);
+    },
+  };
+  const attachFiles = (ChatGptBrowserWorker.prototype as unknown as {
+    attachFiles(page: unknown, prompt: unknown, overflowBuffer?: Buffer): Promise<void>;
+  }).attachFiles;
+
+  await attachFiles.call({ activeComposer: async () => composer }, page, {
+    images: [{ ref: "codex-input-image-1", imageUrl }],
+  }, Buffer.from("overflow context", "utf8"));
+
+  expect(calls).toContain("generic-ready");
+  expect(calls).toContain("generic:codex-input-image-1.png,context_overflow.md");
+  expect(calls).not.toContain("photo-ready");
+  expect(calls).not.toContain("photo:set-files");
 });
 
 test("effort selection uses structural menu and slider indices instead of localized labels", () => {
@@ -1573,9 +1667,9 @@ test("browser preflight separates model context from one-message transport limit
     expect(String(error)).toContain("/compact");
   }
 
-  expect(() => assertChatGptWebInputWithinLimits(40_999, 32_807, "gpt-5.6-sol", "low", plus)).not.toThrow();
-  expect(() => assertChatGptWebInputWithinLimits(41_000, 32_808, "gpt-5.6-sol", "low", plus)).toThrow(
-    "41,000-token context window",
+  expect(() => assertChatGptWebInputWithinLimits(239_999, 32_807, "gpt-5.6-sol", "low", plus)).not.toThrow();
+  expect(() => assertChatGptWebInputWithinLimits(240_000, 32_808, "gpt-5.6-sol", "low", plus)).toThrow(
+    "240,000-token context window",
   );
   expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "medium", plus)).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(89_999, 81_807, "gpt-5.6-sol", "high", plus)).not.toThrow();
@@ -1658,10 +1752,10 @@ test("browser preflight separates model context from one-message transport limit
   )).toThrow("104,000-token ChatGPT browser message boundary");
 });
 
-test("Bigger Context preflight expands only the total context ceiling and keeps each message boundary", () => {
+test("Bigger Context preflight preserves the baseline total context ceiling and keeps each message boundary", () => {
   const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    280_000,
+    111_192,
     95_000,
     "gpt-5.6-sol",
     "high",
@@ -1670,25 +1764,25 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     3,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    333_579,
+    111_193,
     95_000,
     "gpt-5.6-sol",
     "high",
     pro,
     900_000,
     3,
-  )).toThrow("three-part ceiling");
+  )).toThrow("111,193-token model context ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    222_386,
+    111_193,
     95_000,
     "gpt-5.6-sol",
     "high",
     pro,
     900_000,
     2,
-  )).toThrow("two-part ceiling");
+  )).toThrow("two-part transport");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
-    280_000,
+    100_000,
     103_001,
     "gpt-5.6-sol",
     "high",
@@ -1710,7 +1804,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
 test("Bigger Context stages use the lowest account mode that can carry the stage", () => {
   const plus = { localToolsEnabled: false, solAvailable: true, proAvailable: false };
   const pro = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 30_000, 200_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "medium", 30_000, 200_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", plus, "high", 30_000, 300_000).effort).toBe("medium");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "medium", 100_000, 500_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, "medium", 100_000, 600_000).effort).toBe("medium");

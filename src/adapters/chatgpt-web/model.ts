@@ -16,7 +16,7 @@ export interface ChatGptWebModelMode {
   modelId: string;
   effort: "low" | "medium" | "high" | "xhigh" | "max";
   displayLabel: "Luna" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
-  uiEffortIndex: null | 1 | 2 | 3 | 4 | null;
+  uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
   localTools: boolean;
 }
 

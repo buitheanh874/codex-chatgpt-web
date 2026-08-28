@@ -483,11 +483,10 @@ export function assertChatGptWebMultipartInputWithinLimits(
   } else {
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
-  const experimentalContextWindow = contextWindow * partCount;
-  if (estimatedInputTokens < experimentalContextWindow) return;
+  if (estimatedInputTokens < contextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "three-part";
   throw new ChatGptWebAdapterError(
-    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds its experimental ${experimentalContextWindow.toLocaleString("en-US")}-token ${partLabel} ceiling. Run /compact, then retry.`,
+    `This Bigger Context transaction is estimated at ${estimatedInputTokens.toLocaleString("en-US")} input tokens, which exceeds the ${contextWindow.toLocaleString("en-US")}-token model context ceiling for its ${partLabel} transport. Multipart staging changes browser transport only; it does not expand the model context window. Run /compact, then retry.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
   );
 }
@@ -1174,6 +1173,9 @@ export function chatGptPromptFilePayloads(
 }
 
 const HYBRID_CONTEXT_THRESHOLD = 15_000;
+const HYBRID_CONTEXT_OVERFLOW_MARKER = "\n\n[IMPORTANT: The rest of this context is attached as the file \`context_overflow.md\`. "
+  + "You MUST read the attached file carefully and treat its content as part of this prompt. "
+  + "Do NOT ignore it.]";
 
 export function splitLargePrompt(prompt: string): {
   inlineText: string;
@@ -1183,12 +1185,17 @@ export function splitLargePrompt(prompt: string): {
     return { inlineText: prompt, overflowBuffer: undefined };
   }
 
-  let splitIndex = prompt.lastIndexOf("\n\n", HYBRID_CONTEXT_THRESHOLD);
-  if (splitIndex < HYBRID_CONTEXT_THRESHOLD * 0.5) {
-    splitIndex = prompt.lastIndexOf("\n", HYBRID_CONTEXT_THRESHOLD);
+  const inlineBudget = HYBRID_CONTEXT_THRESHOLD - HYBRID_CONTEXT_OVERFLOW_MARKER.length;
+  if (inlineBudget <= 0) {
+    throw new Error("ChatGPT hybrid overflow marker exceeds the inline composer budget");
   }
-  if (splitIndex < HYBRID_CONTEXT_THRESHOLD * 0.5) {
-    splitIndex = HYBRID_CONTEXT_THRESHOLD;
+
+  let splitIndex = prompt.lastIndexOf("\n\n", inlineBudget);
+  if (splitIndex < inlineBudget * 0.5) {
+    splitIndex = prompt.lastIndexOf("\n", inlineBudget);
+  }
+  if (splitIndex < inlineBudget * 0.5) {
+    splitIndex = inlineBudget;
     const prevCharCode = prompt.charCodeAt(splitIndex - 1);
     if (prevCharCode >= 0xD800 && prevCharCode <= 0xDBFF) {
       splitIndex -= 1;
@@ -1198,10 +1205,10 @@ export function splitLargePrompt(prompt: string): {
   const inlinePortion = prompt.slice(0, splitIndex);
   const overflowPortion = prompt.slice(splitIndex);
 
-  const inlineText = inlinePortion
-    + "\n\n[IMPORTANT: The rest of this context is attached as the file \`context_overflow.md\`. "
-    + "You MUST read the attached file carefully and treat its content as part of this prompt. "
-    + "Do NOT ignore it.]";
+  const inlineText = inlinePortion + HYBRID_CONTEXT_OVERFLOW_MARKER;
+  if (inlineText.length > HYBRID_CONTEXT_THRESHOLD) {
+    throw new Error("ChatGPT hybrid inline prompt exceeded its 15,000-character safety ceiling");
+  }
 
   const overflowBuffer = Buffer.from(overflowPortion, "utf-8");
 
@@ -1455,15 +1462,21 @@ export class ChatGptBrowserWorker {
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const uiEffortIndex = mode.uiEffortIndex;
     if (uiEffortIndex === null) {
+      await throwIfChatGptSessionFailureAlert(page);
       await settleChatGptUi();
       await throwIfChatGptRateLimitDialog(page);
-      const visibleControls = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
-      if (await visibleControls.count() > 0) {
-        throw new Error(
-          "ChatGPT Luna was selected from a Luna-only capability probe, but the account now exposes a model selector; rerun setup",
-        );
+      await throwIfChatGptSessionFailureAlert(page);
+      if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+        const visibleControls = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
+        if (await visibleControls.count() > 0) {
+          throw new Error(
+            "ChatGPT Luna was selected from a Luna-only capability probe, but the account now exposes a model selector; rerun setup",
+          );
+        }
+        await captureDiagnostic?.("luna-default-confirmed");
+      } else {
+        await captureDiagnostic?.("effort-selection-bypassed");
       }
-      await captureDiagnostic?.("luna-default-confirmed");
       return mode;
     }
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
@@ -2446,13 +2459,18 @@ export class ChatGptBrowserWorker {
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const hasNonImage = files.some(f => f.mimeType === "text/markdown" || !f.mimeType.startsWith("image/"));
-    let input = page.locator('input[type="file"]').first();
-    if (!hasNonImage) {
+    const hasNonImage = files.some(f => !f.mimeType.startsWith("image/"));
+    const genericInput = () => page
+      .locator('input[type="file"]:not([data-testid="upload-photos-input"])')
+      .first();
+    let input: Locator;
+    if (hasNonImage) {
+      input = genericInput();
+    } else {
       input = page.locator('input[data-testid="upload-photos-input"]');
       const hasPhotoInput = await input.count().catch(() => 0);
       if (hasPhotoInput === 0) {
-        input = page.locator('input[type="file"]').first();
+        input = genericInput();
       }
     }
     await input.waitFor({ state: "attached", timeout: 20_000 });
@@ -3073,8 +3091,10 @@ export class ChatGptBrowserWorker {
       }
       await diagnostics.capture(page, "effort-selection-complete");
 
-      const { inlineText: _hybridInline, overflowBuffer: _hybridOverflow } = splitLargePrompt(prepared.text);
-      let finalPrompt = _hybridInline;
+      const hybridPrompt = prepared.multipart
+        ? { inlineText: prepared.text, overflowBuffer: undefined }
+        : splitLargePrompt(prepared.text);
+      let finalPrompt = hybridPrompt.inlineText;
       if (prepared.multipart && multipartStages && multipartTransactionId && multipartFinalPrompt) {
         for (let index = 0; index < multipartStages.length; index += 1) {
           const stage = multipartStages[index]!;
@@ -3192,7 +3212,7 @@ export class ChatGptBrowserWorker {
       }
       await diagnostics.capture(page, "prompt-attachment-complete");
       await this.runStage(turn.traceId, "file_attachment", browserStageTimeouts.fileAttachment, () => (
-        this.attachFiles(page, prepared, _hybridOverflow)
+        this.attachFiles(page, prepared, hybridPrompt.overflowBuffer)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
       const finalSubmissionEvidence = await this.runStage(

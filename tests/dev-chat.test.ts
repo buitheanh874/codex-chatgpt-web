@@ -116,7 +116,7 @@ test("new DEV chats default to the cheapest account-supported browser model", ()
   expect(defaultDevChatModel({ ...defaultConfig("full"), solAvailable: false })).toBe("chatgpt-web/luna");
 });
 
-test("Bigger Context triples the DEV compaction window and fails closed for Luna", async () => {
+test("Bigger Context keeps the baseline DEV compaction window and fails closed for Luna", async () => {
   const root = scratch("cgw-dev-bigger-context");
   const config = {
     ...defaultConfig("browser-only"),
@@ -144,10 +144,10 @@ test("Bigger Context triples the DEV compaction window and fails closed for Luna
   const biggerState = bigger.open("bigger-window", "chatgpt-web/high").state;
   const biggerStatus = bigger.status(biggerState);
   expect(biggerStatus).toMatchObject({
-    autoCompactTokenLimit: 285_000,
-    contextWindow: 333_579,
+    autoCompactTokenLimit: 95_000,
+    contextWindow: 111_193,
   });
-  expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 285_000) * 1_000) / 10);
+  expect(biggerStatus.percent).toBe(Math.round((biggerStatus.inputTokens / 95_000) * 1_000) / 10);
   const luna = new DevChatDriver({
     ...biggerConfig,
     solAvailable: false,
@@ -342,9 +342,9 @@ test("synthetic fill crosses the production threshold and triggers the real comp
   });
   const store = new DevChatStore(join(root, "chats"));
   const driver = new DevChatDriver(config, store, factory, root);
-  const state = driver.open("auto-compact", "chatgpt-web/light").state;
-  driver.fill(state, 30_000);
-  expect(driver.status(state).inputTokens).toBeGreaterThanOrEqual(32_000);
+  const state = driver.open("auto-compact", "chatgpt-web/medium").state;
+  driver.fill(state, 80_000);
+  expect(driver.status(state).inputTokens).toBeGreaterThanOrEqual(80_000);
   const events: string[] = [];
   const result = await driver.send(state, "Continue after compacting the synthetic history.", event => events.push(event.type));
   expect(result).toMatchObject({ text: "DEV turn completed after compaction.", compactions: 1 });

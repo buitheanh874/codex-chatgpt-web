@@ -1,27 +1,27 @@
 import { expect, test } from "bun:test";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 
-test("the browser adapter maps fixed routed efforts to the visible ChatGPT modes", () => {
+test("the browser adapter maps fixed routed efforts while bypassing the effort selector UI", () => {
   const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", capabilities)).toMatchObject({
     displayLabel: "Instant",
-    uiEffortIndex: 0,
+    uiEffortIndex: null,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "medium", capabilities)).toMatchObject({
-    uiEffortIndex: 1,
+    uiEffortIndex: null,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "high", capabilities)).toMatchObject({
-    uiEffortIndex: 2,
+    uiEffortIndex: null,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "xhigh", capabilities)).toMatchObject({
-    uiEffortIndex: 3,
+    uiEffortIndex: null,
     localTools: true,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", capabilities)).toMatchObject({
-    uiEffortIndex: 4,
+    uiEffortIndex: null,
     localTools: true,
   });
 });
