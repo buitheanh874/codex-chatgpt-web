@@ -574,7 +574,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@c"],
+    ["pressSequentially", "@codex"],
     ["waitForResult"],
     ["press"],
     ["waitForSelectedConnector"],
@@ -653,7 +653,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     fill: async () => { calls.push("clear"); },
     focus: async () => { calls.push("focus"); },
     pressSequentially: async (value: string) => {
-      expect(value).toBe("@c");
+      expect(value).toBe("@codex");
       calls.push("type");
     },
   };
@@ -928,7 +928,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["type", "@c"],
+    ["type", "@codex"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
