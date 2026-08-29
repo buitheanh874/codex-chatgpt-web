@@ -1513,8 +1513,25 @@ describe("ChatGPT outer-native harness v4", () => {
       { key: "source", html: linked, text: "Source", streamable: true },
     ], 150)).toBe("[Source](https://example.com)");
     expect(hydrated.observe([
-      { key: "source", html: `${linked}<button>Copy</button>`, text: "Source", streamable: true },
+      { key: "source", html: `${linked}<button>Copy</button>`, text: "Source\nCopy", streamable: true },
     ], 200)).toBe("");
+
+    const controlHydration = new ChatGptMarkdownBuffer(markdown => markdown, 100, 500);
+    const linkedSource = [{ key: "source", html: linked, text: "Source", streamable: true }];
+    expect(controlHydration.observe(linkedSource, 0)).toBe("");
+    expect(controlHydration.observe(linkedSource, 100)).toBe("[Source](https://example.com)");
+    const linkedWithControl = [{
+      key: "source",
+      html: `${linked}<button>Copy</button>`,
+      text: "Source\nCopy",
+      streamable: true,
+    }];
+    expect(controlHydration.observe(linkedWithControl, 200)).toBe("");
+    expect(controlHydration.currentSnapshotIsConsistent()).toBe(true);
+    expect(controlHydration.finish()).toEqual({
+      markdown: "[Source](https://example.com)",
+      delta: "",
+    });
 
     const rewritten = new ChatGptMarkdownBuffer(markdown => markdown, 100, 500);
     const source = [{ key: "source", html: plain, text: "Source", streamable: true }];

@@ -58,6 +58,7 @@ interface ChatGptMarkdownCandidate extends ChatGptMarkdownSegment {
 interface CommittedChatGptMarkdownSegment {
   key: string;
   text: string;
+  block: string;
 }
 
 export class ChatGptMarkdownConsistencyError extends Error {
@@ -143,8 +144,9 @@ export class ChatGptMarkdownBuffer {
       const candidate = this.candidates.get(index);
       if (!candidate?.streamable || candidate.streamableAt === undefined) break;
       if (now - Math.max(candidate.changedAt, candidate.streamableAt) < this.stabilityMs) break;
-      delta += this.commit(candidate);
-      this.committed.push({ key: candidate.key, text: candidate.text });
+      const committed = this.commit(candidate);
+      delta += committed.delta;
+      this.committed.push({ key: candidate.key, text: candidate.text, block: committed.block });
       this.candidates.delete(index);
     }
     return delta;
@@ -157,8 +159,9 @@ export class ChatGptMarkdownBuffer {
     let delta = "";
     for (let index = this.committed.length; index < this.latest.length; index += 1) {
       const segment = this.latest[index]!;
-      delta += this.commit(segment);
-      this.committed.push({ key: segment.key, text: segment.text });
+      const committed = this.commit(segment);
+      delta += committed.delta;
+      this.committed.push({ key: segment.key, text: segment.text, block: committed.block });
     }
     this.candidates.clear();
     return { markdown: this.markdown, delta };
@@ -177,7 +180,12 @@ export class ChatGptMarkdownBuffer {
     for (let index = 0; index < this.committed.length; index += 1) {
       const previous = this.committed[index]!;
       const current = segments[index]!;
-      if (current.key !== previous.key) { // Relaxed text check to allow math/citation re-renders
+      if (current.key !== previous.key) {
+        return new ChatGptMarkdownConsistencyError(
+          "ChatGPT changed a completed text block that was already streamed to Codex",
+        );
+      }
+      if (current.text !== previous.text && this.renderBlock(current) !== previous.block) {
         return new ChatGptMarkdownConsistencyError(
           "ChatGPT changed a completed text block that was already streamed to Codex",
         );
@@ -186,15 +194,19 @@ export class ChatGptMarkdownBuffer {
     return undefined;
   }
 
-  private commit(segment: ChatGptMarkdownSegment): string {
-    const block = this.transform(chatGptHtmlToMarkdown(segment.html));
-    if (!block) return "";
+  private renderBlock(segment: ChatGptMarkdownSegment): string {
+    return this.transform(chatGptHtmlToMarkdown(segment.html));
+  }
+
+  private commit(segment: ChatGptMarkdownSegment): { block: string; delta: string } {
+    const block = this.renderBlock(segment);
+    if (!block) return { block, delta: "" };
     const separator = this.markdown
       ? segment.group !== undefined && segment.group === this.lastGroup ? "\n" : "\n\n"
       : "";
     const delta = `${separator}${block}`;
     this.markdown += delta;
     this.lastGroup = segment.group;
-    return delta;
+    return { block, delta };
   }
 }

@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "codex-chatgpt-web",
   "version": "4.1.2",
   "private": true,
@@ -11,7 +11,7 @@
   "bugs": {
     "url": "https://github.com/miuuyy/codex-chatgpt-web/issues"
   },
-  "packageManager": "bun@1.3.13",
+  "packageManager": "bun@1.4.0",
   "type": "module",
   "bin": {
     "codex-chatgpt-web": "./src/cli.ts"

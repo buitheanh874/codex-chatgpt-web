@@ -146,6 +146,24 @@ const settleChatGptUi = (): Promise<void> => (
   new Promise(resolveSettle => setTimeout(resolveSettle, CHATGPT_UI_SETTLE_MS))
 );
 
+/**
+ * Chromium reports ERR_ABORTED when an in-flight navigation is superseded by another navigation.
+ * ChatGPT can do this during its SPA/bootstrap handoff, so the navigation error alone is not proof
+ * that the requested surface failed to load. Callers must still verify the final URL, composer, and
+ * authentication state before treating the page as usable.
+ */
+export function isChatGptSupersededNavigation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? (error as { code?: unknown }).code : undefined;
+  if (code === "ERR_ABORTED") return true;
+  const message = error instanceof Error
+    ? error.message
+    : "message" in error && typeof (error as { message?: unknown }).message === "string"
+      ? (error as { message: string }).message
+      : "";
+  return /(?:^|\s)net::ERR_ABORTED(?:\s+at\s+|\s*$)/.test(message);
+}
+
 class ChatGptConnectorCatalogStaleError extends Error {
   constructor(
     readonly appName: string,
@@ -1653,10 +1671,19 @@ export class ChatGptBrowserWorker {
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
-      });
+      try {
+        await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+      } catch (error) {
+        // ChatGPT's bootstrap can replace this navigation and make Playwright report ERR_ABORTED
+        // even though the replacement lands on the requested Temporary Chat surface. Do not call
+        // this success yet: activeComposer/assertAuthenticated/assertTemporary below remain the
+        // authoritative fail-closed postconditions.
+        if (!isChatGptSupersededNavigation(error)) throw error;
+        await captureDiagnostic?.("temporary-chat-navigation-superseded");
+      }
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
     let composer: Locator;
@@ -2580,6 +2607,21 @@ export class ChatGptBrowserWorker {
         "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
         "li", "main", "nav", "ol", "p", "pre", "section", "table", "ul",
       ]);
+      // Keep the stream-consistency fingerprint aligned with the content Turndown can actually
+      // emit. ChatGPT can hydrate citation/copy controls after a block has already stabilized;
+      // their labels change `innerText`, but those nodes are deliberately removed from Markdown.
+      const streamInvariantText = (candidate: HTMLElement): string => {
+        const clone = candidate.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll("button,script,style,img,picture,source,svg").forEach(node => node.remove());
+        clone.querySelectorAll<HTMLElement>(".katex").forEach(math => {
+          const source = math.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
+          if (source) math.replaceWith(document.createTextNode(source));
+        });
+        return (clone.textContent ?? "")
+          .normalize("NFC")
+          .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+          .trim();
+      };
       let listGroupIndex = 0;
       const appendBlockSegment = (child: HTMLElement) => {
         const tag = child.tagName.toLowerCase();
@@ -2590,7 +2632,7 @@ export class ChatGptBrowserWorker {
           flattenedMarkdownSegments.push({
             tag,
             html: child.outerHTML,
-            text: child.innerText.trim(),
+            text: streamInvariantText(child),
           });
           return;
         }
@@ -2607,7 +2649,7 @@ export class ChatGptBrowserWorker {
           flattenedMarkdownSegments.push({
             tag: `${tag}:item`,
             html: shell.outerHTML,
-            text: item.innerText.trim(),
+            text: streamInvariantText(item),
             group,
           });
         });
@@ -2619,7 +2661,7 @@ export class ChatGptBrowserWorker {
           if (markdownRoot.innerHTML.trim()) flattenedMarkdownSegments.push({
             tag: "root",
             html: markdownRoot.innerHTML,
-            text: markdownRoot.innerText.trim(),
+            text: streamInvariantText(markdownRoot),
           });
           return;
         }
@@ -2630,7 +2672,7 @@ export class ChatGptBrowserWorker {
           const shell = document.createElement("span");
           inlineRun.forEach(node => shell.append(node.cloneNode(true)));
           inlineRun = [];
-          const text = shell.textContent?.trim() ?? "";
+          const text = streamInvariantText(shell);
           if (text) {
             flattenedMarkdownSegments.push({
               tag: "inline",
