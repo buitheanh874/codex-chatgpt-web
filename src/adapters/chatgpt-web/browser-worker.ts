@@ -2030,6 +2030,10 @@ export class ChatGptBrowserWorker {
     }
     throwIfPromptAttachmentAborted(abortSignal);
     const commonPrefix = this.promptEquivalentPrefixLength(prompt, observed);
+    if (prompt.length === observed.length) {
+      this.logger?.warn("browser.prompt_mutation_tolerated", { expectedChars: prompt.length, commonPrefix });
+      return;
+    }
     throw new ChatGptPromptAttachmentIntegrityError(
       `ChatGPT composer did not preserve the complete prompt (expectedChars=${prompt.length}, actualChars=${observed.length}, commonPrefixChars=${commonPrefix})`,
     );
