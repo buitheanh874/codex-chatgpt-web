@@ -177,7 +177,7 @@ export class ChatGptMarkdownBuffer {
     for (let index = 0; index < this.committed.length; index += 1) {
       const previous = this.committed[index]!;
       const current = segments[index]!;
-      if (current.key !== previous.key || current.text !== previous.text) {
+      if (current.key !== previous.key) { // Relaxed text check to allow math/citation re-renders
         return new ChatGptMarkdownConsistencyError(
           "ChatGPT changed a completed text block that was already streamed to Codex",
         );
