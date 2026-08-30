@@ -118,8 +118,16 @@ function assertBrowserToolArguments(tool: CodexTool, args: Record<string, unknow
   }
 }
 
-function invocationTimeout(environment: ChatGptTurnEnvironment & { expiresAt?: number }): number | null {
-  return environment.expiresAt === undefined ? null : Math.max(1, environment.expiresAt - Date.now());
+export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 120_000;
+
+export function chatGptMcpInvocationTimeout(
+  environment: ChatGptTurnEnvironment & { expiresAt?: number },
+  now = Date.now(),
+): number {
+  const remaining = environment.expiresAt === undefined
+    ? CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS
+    : Math.max(1, environment.expiresAt - now);
+  return Math.min(CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS, remaining);
 }
 
 function asMcpResult(value: BrokerToolResult) {
@@ -218,7 +226,7 @@ export async function runChatGptMcpServer(options: { brokerSocketPath: string })
       wireName: wireName(tool),
       freeform: tool.freeform === true,
       ...(tool.freeform ? { input: payload.input ?? "" } : { arguments: payload.arguments ?? {} }),
-    }, invocationTimeout(bound));
+    }, chatGptMcpInvocationTimeout(bound));
     return asMcpResult(response);
   };
 
