@@ -1311,8 +1311,8 @@ export function chatGptPromptFilePayloads(
   const files = chatGptImageFilePayloads(prompt.images);
   if (overflowBuffer && overflowBuffer.length > 0) {
     files.push({
-      name: "context_overflow.md",
-      mimeType: "text/markdown",
+      name: "context_overflow.txt",
+      mimeType: "text/plain",
       buffer: overflowBuffer,
     });
   }
@@ -2656,6 +2656,13 @@ export class ChatGptBrowserWorker {
         composerForm.getByRole("group", { name: file.name, exact: true })
           .waitFor({ state: "visible", timeout: 60_000 })
       )));
+      
+      const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
+        .map(text => text.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      if (alerts.length > 0) {
+        throw new Error("Alerts present after upload");
+      }
     } catch {
       const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
         .map(text => text.replace(/\s+/g, " ").trim())
