@@ -1559,6 +1559,64 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(buffer.finish()).toEqual({ markdown: "First\n\nSecond", delta: "\n\nSecond" });
   });
 
+  test("tolerates persistent DOM re-segmentation when already-streamed Markdown is unchanged", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100, 500);
+    const first = { key: "first", html: "<p>First</p>", text: "First", streamable: true };
+    const second = { key: "second", html: "<p>Second</p>", text: "Second", streamable: false };
+    expect(buffer.observe([first, second], 0)).toBe("");
+    expect(buffer.observe([first, second], 100)).toBe("First");
+
+    const merged = {
+      key: "merged",
+      html: "<p>First</p><p>Second</p>",
+      text: "First\nSecond",
+      streamable: false,
+    };
+    expect(buffer.observe([merged], 200)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBe(true);
+    expect(buffer.finish()).toEqual({ markdown: "First\n\nSecond", delta: "\n\nSecond" });
+  });
+
+  test("finishes a re-segmented snapshot by appending only its exact Markdown suffix", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100, 500);
+    const first = { key: "first", html: "<p>First</p>", text: "First", streamable: true };
+    const second = { key: "second", html: "<p>Second</p>", text: "Second", streamable: true };
+    const third = { key: "third", html: "<p>Third</p>", text: "Third", streamable: false };
+    expect(buffer.observe([first, second, third], 0)).toBe("");
+    expect(buffer.observe([first, second, third], 100)).toBe("First\n\nSecond");
+
+    const merged = {
+      key: "merged",
+      html: "<p>First</p><p>Second</p><p>Third</p>",
+      text: "First\nSecond\nThird",
+      streamable: false,
+    };
+    expect(buffer.observe([merged], 200)).toBe("");
+    expect(buffer.finish()).toEqual({
+      markdown: "First\n\nSecond\n\nThird",
+      delta: "\n\nThird",
+    });
+  });
+
+  test("still fails closed when re-segmentation rewrites already-streamed Markdown", () => {
+    const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100, 500);
+    const first = { key: "first", html: "<p>First</p>", text: "First", streamable: true };
+    const second = { key: "second", html: "<p>Second</p>", text: "Second", streamable: false };
+    expect(buffer.observe([first, second], 0)).toBe("");
+    expect(buffer.observe([first, second], 100)).toBe("First");
+
+    const rewritten = {
+      key: "merged",
+      html: "<p>Changed</p><p>Second</p>",
+      text: "Changed\nSecond",
+      streamable: false,
+    };
+    expect(buffer.observe([rewritten], 200)).toBe("");
+    expect(buffer.currentSnapshotIsConsistent()).toBe(false);
+    expect(() => buffer.finish()).toThrow("completed text block");
+    expect(() => buffer.observe([rewritten], 700)).toThrow("completed text block");
+  });
+
   test("an appended inline tail extends already-streamed block Markdown without collapsing it", () => {
     const buffer = new ChatGptMarkdownBuffer(markdown => markdown, 100);
     const first = { key: "0:p", html: "<p>First</p>", text: "First", streamable: true };

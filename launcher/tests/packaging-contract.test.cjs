@@ -9,6 +9,8 @@ const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
 const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
+const bunVersion = String(repositoryManifest.packageManager || "").replace(/^bun@/, "");
+const escapedBunVersion = bunVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 test("the public launcher command uses the Electron bootstrap", () => {
   assert.equal(repositoryManifest.scripts.launcher, "bun run scripts/start-launcher.ts");
@@ -77,6 +79,33 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(packageSmoke, /reg\.exe[\s\S]*InstallLocation/);
 });
 
+test("all public distribution paths target the custom release repository", () => {
+  const expectedRepository = "buitheanh874/codex-chatgpt-web";
+  const expectedBaseUrl = `https://github.com/${expectedRepository}`;
+  const updater = fs.readFileSync(path.join(launcherRoot, "electron", "update.cjs"), "utf8");
+  const launcherMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
+  const shellInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.sh"), "utf8");
+  const windowsInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.ps1"), "utf8");
+  const sourceInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install.sh"), "utf8");
+  const readme = fs.readFileSync(path.join(repositoryRoot, "README.md"), "utf8");
+  const readmeZh = fs.readFileSync(path.join(repositoryRoot, "README.zh-CN.md"), "utf8");
+
+  assert.equal(repositoryManifest.repository.url, `git+${expectedBaseUrl}.git`);
+  assert.equal(repositoryManifest.homepage, `${expectedBaseUrl}#readme`);
+  assert.equal(repositoryManifest.bugs.url, `${expectedBaseUrl}/issues`);
+  assert.ok(updater.includes(`const REPOSITORY = "${expectedRepository}"`));
+  assert.ok(launcherMain.includes(`const GITHUB_URL = "${expectedBaseUrl}"`));
+  assert.ok(shellInstaller.includes(`CODEX_WEB_GPT_REPOSITORY:-${expectedRepository}`));
+  assert.ok(windowsInstaller.includes(`else { "${expectedRepository}" }`));
+  assert.ok(sourceInstaller.includes(`CODEX_CHATGPT_WEB_REPOSITORY:-${expectedRepository}`));
+
+  for (const documentation of [readme, readmeZh]) {
+    assert.ok(documentation.includes(`${expectedBaseUrl}/releases/latest/download/install-launcher.sh`));
+    assert.ok(documentation.includes(`${expectedBaseUrl}/releases/latest/download/install-launcher.ps1`));
+    assert.ok(documentation.includes(`git clone ${expectedBaseUrl}.git`));
+  }
+});
+
 test("packaged launcher owns a detached checksummed updater for every release platform", () => {
   const updater = fs.readFileSync(path.join(launcherRoot, "electron", "update.cjs"), "utf8");
   const worker = fs.readFileSync(path.join(launcherRoot, "electron", "update-worker.cjs"), "utf8");
@@ -94,13 +123,14 @@ test("packaged launcher owns a detached checksummed updater for every release pl
 test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   const ci = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
   const release = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
+  assert.match(bunVersion, /^\d+\.\d+\.\d+$/);
   assert.match(ci, /macos-15, ubuntu-latest, windows-latest/);
   assert.match(ci, /bun run app:package/);
   assert.match(ci, /bun run app:smoke/);
   assert.match(ci, /prepare-linux-libnotify\.sh/);
   assert.match(ci, /prepare-linux-appimage-tools\.cjs/);
   assert.match(ci, /archlinux:base/);
-  assert.match(ci, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
+  assert.match(ci, new RegExp(`prepare-windows-baseline-bun\\.ps1 -Version ${escapedBunVersion}`));
   for (const runner of ["macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"]) {
     assert.match(release, new RegExp(runner));
   }
@@ -109,7 +139,7 @@ test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
   assert.match(release, /prepare-linux-libnotify\.sh/);
   assert.match(release, /prepare-linux-appimage-tools\.cjs/);
   assert.match(release, /archlinux:base/);
-  assert.match(release, /prepare-windows-baseline-bun\.ps1 -Version 1\.4\.0/);
+  assert.match(release, new RegExp(`prepare-windows-baseline-bun\\.ps1 -Version ${escapedBunVersion}`));
   assert.match(release, /codesign --verify --deep --strict --verbose=2/);
   assert.match(release, /Codex Web GPT\.app/);
   assert.doesNotMatch(release, /gh release create[\s\S]*?--draft/);

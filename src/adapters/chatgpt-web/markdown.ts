@@ -106,6 +106,13 @@ export class ChatGptMarkdownBuffer {
   observe(segments: ChatGptMarkdownSegment[], now = Date.now()): string {
     const prefixError = this.committedPrefixError(segments);
     if (prefixError) {
+      const snapshotMarkdown = this.renderSnapshot(segments);
+      if (snapshotMarkdown.startsWith(this.markdown)) {
+        this.prefixMismatch = undefined;
+        this.latest = segments.map(segment => ({ ...segment }));
+        this.candidates.clear();
+        return "";
+      }
       if (!this.prefixMismatch || this.prefixMismatch.error.message !== prefixError.message) {
         this.prefixMismatch = { error: prefixError, firstSeenAt: now };
       }
@@ -155,7 +162,14 @@ export class ChatGptMarkdownBuffer {
   finish(): { markdown: string; delta: string } {
     if (this.prefixMismatch) throw this.prefixMismatch.error;
     const prefixError = this.committedPrefixError(this.latest);
-    if (prefixError) throw prefixError;
+    if (prefixError) {
+      const snapshotMarkdown = this.renderSnapshot(this.latest);
+      if (!snapshotMarkdown.startsWith(this.markdown)) throw prefixError;
+      const delta = snapshotMarkdown.slice(this.markdown.length);
+      this.markdown = snapshotMarkdown;
+      this.candidates.clear();
+      return { markdown: this.markdown, delta };
+    }
     let delta = "";
     for (let index = this.committed.length; index < this.latest.length; index += 1) {
       const segment = this.latest[index]!;
@@ -196,6 +210,21 @@ export class ChatGptMarkdownBuffer {
 
   private renderBlock(segment: ChatGptMarkdownSegment): string {
     return this.transform(chatGptHtmlToMarkdown(segment.html));
+  }
+
+  private renderSnapshot(segments: ChatGptMarkdownSegment[]): string {
+    let markdown = "";
+    let lastGroup: string | undefined;
+    for (const segment of segments) {
+      const block = this.renderBlock(segment);
+      if (!block) continue;
+      const separator = markdown
+        ? segment.group !== undefined && segment.group === lastGroup ? "\n" : "\n\n"
+        : "";
+      markdown += `${separator}${block}`;
+      lastGroup = segment.group;
+    }
+    return markdown;
   }
 
   private commit(segment: ChatGptMarkdownSegment): { block: string; delta: string } {
