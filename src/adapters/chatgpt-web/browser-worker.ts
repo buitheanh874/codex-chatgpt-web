@@ -1289,8 +1289,60 @@ export function chatGptImageFilePayloads(images: ChatGptWebPromptImage[]): Array
 
 export function chatGptPromptFilePayloads(
   prompt: CompiledChatGptWebPrompt,
+  overflowBuffer?: Buffer,
 ): Array<{ name: string; mimeType: string; buffer: Buffer }> {
-  return chatGptImageFilePayloads(prompt.images);
+  const files = chatGptImageFilePayloads(prompt.images);
+  if (overflowBuffer && overflowBuffer.length > 0) {
+    files.push({
+      name: "context_overflow.txt",
+      mimeType: "text/plain",
+      buffer: overflowBuffer,
+    });
+  }
+  return files;
+}
+
+const HYBRID_CONTEXT_THRESHOLD = 15_000;
+const HYBRID_CONTEXT_OVERFLOW_MARKER = "\n\n[IMPORTANT: The rest of this context is attached as the file `context_overflow.txt`. "
+  + "You MUST read the attached file carefully and treat its content as part of this prompt. "
+  + "Do NOT ignore it.]";
+
+export function splitLargePrompt(prompt: string): {
+  inlineText: string;
+  overflowBuffer: Buffer | undefined;
+} {
+  if (prompt.length <= HYBRID_CONTEXT_THRESHOLD) {
+    return { inlineText: prompt, overflowBuffer: undefined };
+  }
+
+  const inlineBudget = HYBRID_CONTEXT_THRESHOLD - HYBRID_CONTEXT_OVERFLOW_MARKER.length;
+  if (inlineBudget <= 0) {
+    throw new Error("ChatGPT hybrid overflow marker exceeds the inline composer budget");
+  }
+
+  let splitIndex = prompt.lastIndexOf("\n\n", inlineBudget);
+  if (splitIndex < inlineBudget * 0.5) {
+    splitIndex = prompt.lastIndexOf("\n", inlineBudget);
+  }
+  if (splitIndex < inlineBudget * 0.5) {
+    splitIndex = inlineBudget;
+    const prevCharCode = prompt.charCodeAt(splitIndex - 1);
+    if (prevCharCode >= 0xD800 && prevCharCode <= 0xDBFF) {
+      splitIndex -= 1;
+    }
+  }
+
+  const inlinePortion = prompt.slice(0, splitIndex);
+  const overflowPortion = prompt.slice(splitIndex);
+
+  const inlineText = inlinePortion + HYBRID_CONTEXT_OVERFLOW_MARKER;
+  if (inlineText.length > HYBRID_CONTEXT_THRESHOLD) {
+    throw new Error("ChatGPT hybrid inline prompt exceeded its 15,000-character safety ceiling");
+  }
+
+  const overflowBuffer = Buffer.from(overflowPortion, "utf-8");
+
+  return { inlineText, overflowBuffer };
 }
 
 export class ChatGptBrowserWorker {
@@ -2546,12 +2598,27 @@ export class ChatGptBrowserWorker {
     return { effort: mode.displayLabel, response: CHATGPT_SMOKE_EXPECTED };
   }
 
-  private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt): Promise<void> {
-    const files = chatGptPromptFilePayloads(prompt);
+  private async attachFiles(page: Page, prompt: CompiledChatGptWebPrompt, overflowBuffer?: Buffer): Promise<void> {
+    const files = chatGptPromptFilePayloads(prompt, overflowBuffer);
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const input = page.locator('input[data-testid="upload-photos-input"]');
+    
+    const hasNonImage = files.some(f => !f.mimeType.startsWith("image/"));
+    const genericInput = () => page
+      .locator('input[type="file"]:not([data-testid="upload-photos-input"])')
+      .first();
+    let input;
+    if (hasNonImage) {
+      input = genericInput();
+    } else {
+      input = page.locator('input[data-testid="upload-photos-input"]');
+      const hasPhotoInput = await input.count().catch(() => 0);
+      if (hasPhotoInput === 0) {
+        input = genericInput();
+      }
+    }
+    
     await input.waitFor({ state: "attached", timeout: 20_000 });
     await input.setInputFiles(files);
     try {
@@ -2559,6 +2626,12 @@ export class ChatGptBrowserWorker {
         composerForm.getByRole("group", { name: file.name, exact: true })
           .waitFor({ state: "visible", timeout: 60_000 })
       )));
+      const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
+        .map(text => text.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      if (alerts.length > 0) {
+        throw new Error("Alerts present after upload");
+      }
     } catch {
       const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))
         .map(text => text.replace(/\s+/g, " ").trim())
